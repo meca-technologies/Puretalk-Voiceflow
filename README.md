@@ -1,7 +1,7 @@
 # Puretalk-Voiceflow
 ## Diagrams
 ### Twilio Layout
-![Twilio Overview](https://dashboard.puretalk.ai/static/img/twilio-diagram.jpg)
+![Twilio Overview](https://dashboard.puretalk.ai/static/img/diagram_vf.jpg)
 ### Stack Layout
 ![Twilio Overview](https://dashboard.puretalk.ai/static/img/stack-vf-sm.jpg)
 ## Definitions
