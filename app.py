@@ -22,11 +22,10 @@ from sqlescapy import sqlescape
 
 tts_url = 'http://137.184.57.49:5006/convert'
 
-xfer_response = ['autotransport/transfer-1', 'transfer/Transfer', 'solar/transfer-1', 'solar/transfer-1', 'u65/hold', 'town-hall/transfer-1', 'transfer-now']
+xfer_response = ['transfer-now']
 
 # setting up logging
 logger = logging.getLogger('Voiceflow')
-
 logger.setLevel(logging.DEBUG)
 todayFormatted = (datetime.datetime.today()).strftime("%Y-%m-%d")
 fh = logging.FileHandler('logs/voiceflow-{}.py.log'.format(todayFormatted))
@@ -59,6 +58,14 @@ def recordCall(api_key):
     </Response>'''
     return Response(str(voice_response_xml), mimetype="text/xml")
 
+### THIS ROUTE HANDLES ALL OF THE VOICE ACTION WEBHOOKS SENT FROM TWILIO
+### THE SLUG IS THE VF API KEY FOR THE BOT
+### REQUEST PARAMS HANDLES WHETHER IT IS USING ACTIVE LISTENING AND WHETHER IT IS USING THE SANDBOX MODULE
+### REQUEST FORM HANDLES THE FOLLOWING
+###     - CALLSID: THE UNIQUE ID FOR THE CALL FROM TWILIO. ALSO USED AS THE CONVERSATION ID IN VOICEFLOW
+###     - SPEECHRESULT: THIS IS THE TEXT CONVERTED FROM SPEECH OF THE CUSTOMER
+###     - FROM/TO: DEPENDING ON THE DIRECTION OF THE CALL THIS IS THE CUSTOMER PHONE NUMBER. THIS IS USED AS THE XFER CALLER ID 
+###     - DIRECTION: WHETHER THE CALL WAS OUTBOUND OR INBOUND 
 @app.route('/<api_key>', methods=['POST'])
 def index(api_key):
     sandbox = False
@@ -77,8 +84,13 @@ def index(api_key):
         text = cleanText(text)
     logger.debug('Twilio Speech Result: {}'.format(text))
     logger.debug(text)
+
+    # TWILIO VOICE RESPONSE BUILDER *ONLY FOR NON-ACTIVE LISTENING
     voice_response = VoiceResponse()
+
+    # THIS THE URL WE CALLBACK TO WHEN THE CUSTOMER TALKS AGAIN
     action_url = f"https://voiceflow.puretalk.ai/{api_key}"
+
     if sandbox:
         action_url += '?sandbox=1'
         if request.args.get('active') == '1':
@@ -87,13 +99,18 @@ def index(api_key):
     if request.args.get('active') == '1':
         action_url += '?active=1'
 
+    # TWILIO VOICE RESPONSE BUILDER *ONLY FOR ACTIVE LISTENING
     voice_response_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather action="{action_url}" actionOnEmptyResult="true" enhanced="true" input="speech" speechModel="phone_call" speechTimeout="0">
     '''
+
+    # PLIVO VOICE RESPONSE BUILDER *ONLY FOR PLIVO
     voice_response_xml_plivo = f'''<Response>
     <GetInput action="{action_url}" inputType="speech">
     '''
+
+    # NON ACTIVE LISTENING GATHER
     gather = Gather(
         input="speech",
         action=action_url,
@@ -105,6 +122,7 @@ def index(api_key):
     transfer = False
     first_time = True
     try:
+        # THERE WAS NO SPEECH CHECK TO SEE IF THE CALL IS NEW OR NOT
         if text == None: 
             con = sqlite3.connect(DB_PATH)
             cur = con.cursor()
@@ -116,16 +134,20 @@ def index(api_key):
                 text = 'Hello'
         else:
             first_time = False
-        
+        # THERE WAS A SPEECH FROM THE CUSTOMER
         if text:
             if sandbox:
                 updateSandboxConversation(call_id, "client", text)
+            # CREATE A RECORD OF THE CALL SINCE IT IS NEW
             if first_time:
                 logger.debug('First time need to create record')
                 updateSQL(f"insert into calls(call_id, transfer, hangup, repeat_times, repeat_text) values('{call_id}', 0, 0, 0, '')")
+            
+            # GENERATE JSON BODY FOR VOICEFLOW WITH WHAT THE CUSTOMER RESPONDED WITH
             body = {"request": {"type": "text", "payload": text}}
 
-            # Start a conversation
+            # START/CONTINUE CONVERSATION
+            # SEND THE CUSTOMER RESPONSE TO VOICEFLOW
             logger.debug('Making Request to voiceflow')
             response = requests.post(
                 f"https://general-runtime.voiceflow.com/state/user/{call_id}/interact",
@@ -137,32 +159,43 @@ def index(api_key):
             first_text_line = True
             logger.debug('Voiceflow JSON: {}'.format(str(req_json)))
             
+            # GO THROUGH VOICEFLOW API RESPONSE AND GET AI RESPONSE
             for response in req_json:
+                # CHECK FOR AN AI RESPONSE
                 has_message = False
                 try:
                     if response['payload']['message']:
                         has_message = True
                 except:
                     pass
+                # THERE IS A RESPONSE FROM THE AI
                 if has_message:
+                    # CREATES/RETRIEVES TTS AUDIO FOR AI RESPONSE
                     msg_text = response['payload']['message']
                     play_file = createFile(msg_text)
                     logger.debug(f'PLAY FILE: {play_file}')
                     
+                    # UPDATES SANDBOX CONVERSATION
                     if sandbox:
                         updateSandboxConversation(call_id, "ai", msg_text)
+
                     logger.debug('AI Message: {}'.format(str(msg_text)))
                     con = sqlite3.connect(DB_PATH)
                     cur = con.cursor()
+                    # CHECKS TO SEE IF WE ARE REPEATING OURSELVES
                     if first_text_line:
                         query = f"SELECT repeat_times FROM calls WHERE call_id = '{call_id}' and repeat_text = '%s'" % sqlescape(msg_text)
                         logger.debug(query)
                         logger.debug('UPDATE ROWS SQLITE: {}'.format(query))
                         repeat_times = 0
+
+                        # SEE IF WE DID REPEAT OURSELVES
                         for row in cur.execute(query):
                             repeat_times = row[0]
                             repeat_times += 1
                             updateSQL(f"update calls set repeat_times = {repeat_times} where call_id = '{call_id}'")
+
+                            # REPEATED OURSELVES TOO MANY TIMES SEND A HANGUP RESPONSE TO TWILIO
                             if repeat_times > 2:
                                 try:
                                     updateNoAnswer(call_id)
@@ -171,15 +204,20 @@ def index(api_key):
                                 voice_response.hangup()
                                 hangup = True
                         logger.debug(f'REPEATED TIMES: {repeat_times}')
+
+                        # DIDN'T REPEAT OURSELVES SET IT BACK TO ZERO
                         if repeat_times == 0:
                             updateSQL(f"update calls set repeat_times = {repeat_times} where call_id = '%s'" % sqlescape(call_id))
                     first_text_line = False
+
+                    # SET THE LAST THING THE CUSTOMER SAID
                     query = f"update calls set repeat_text = '%s' where call_id = '{call_id}'" % sqlescape(msg_text)
                     logger.debug(query)
                     logger.debug('UPDATE CALLS SQLITE: {}'.format(query))
                     updateSQL(query)
                     logger.debug('COMMITTED UPDATE CALLS SQLITE')
 
+                    # CHECK TO SEE IF WE NEED TO TRANSFER THE CALL OR NOT
                     if not msg_text in xfer_response:
                         voice_response_xml += play_file
                         voice_response_xml_plivo += play_file
@@ -216,6 +254,7 @@ def index(api_key):
                             logger.debug("Failed sending transfer data")
                 else:
                     try:
+                        # CHECK TO SEE IF VF IS SENDING AN END CONVERSATION
                         if response['type'] == 'end' and transfer == False:
                             logger.debug("HANGUP CALL")
                             voice_response.hangup()
@@ -223,6 +262,7 @@ def index(api_key):
                     except:
                         pass
         else:
+            # CUSTOMER SAID NOTHING SO THE AI WILL REPEAT ITSELF
             msg_text = 'None'
             con = sqlite3.connect(DB_PATH)
             cur = con.cursor()
