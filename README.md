@@ -70,7 +70,7 @@ source voiceflowenv/bin/activate
 ```
 * Clone Repo
 ```bash
-git clone https://github.com/meca-technologies/Puretalk-Voiceflow.git
+git clone https://github.com/meca-technologies/Puretalk-Voiceflow.git 
 ```
 * Install all requirements
 ```bash
@@ -91,7 +91,7 @@ Output
 [2021-11-19 23:08:11 +0000] [8760] [INFO] Shutting down: Master
 ```
 #### Setting up GUNICORN
-* Start by deactivating the virtual environment
+* Start by deactivating the virtual environment & it should work
 ```bash
 deactivate
 ```
