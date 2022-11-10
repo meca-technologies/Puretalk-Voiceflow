@@ -1,8 +1,8 @@
 from flask import Flask, request, Response, jsonify
-from twilio.twiml.voice_response import VoiceResponse, Gather
-from twilio.rest import Client
-
+#from twilio.twiml.voice_response import VoiceResponse, Gather
+#from twilio.rest import Client
 import plivo
+import copy
 
 import pymongo
 from bson.objectid import ObjectId
@@ -46,17 +46,20 @@ app.redis = redis.Redis(
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 app.mongo_client = pymongo.MongoClient("mongodb+srv://admin:QM6icvpQ6SlOveul@cluster0.vc0rw.mongodb.net/myFirstDatabase?retryWrites=true&w=majority")
 
-@app.route('/record/<api_key>', methods=['POST'])
-def recordCall(api_key):
-    call_id = request.form.get("CallUUID")
-    logger.debug(call_id)
-    action_url = f"https://voiceflow.puretalk.ai/VF.DM.61eafd218f8500001ba1965f.G1tLeNLTWDF3vuEm?active=1"
-
-    voice_response_xml = f'''<Response>    
-    <Record startOnDialAnswer="true" redirect="false" />
-    <GetInput action="{action_url}" inputType="speech" />
-    </Response>'''
-    return Response(str(voice_response_xml), mimetype="text/xml")
+#@app.route('/record/<api_key>', methods=['POST'])
+# def recordCall(api_key):
+#     call_id = request.form.get("CallUUID")
+#     logger.debug(call_id)
+#     action_url = f"https://voiceflow.puretalk.ai/VF.DM.61eafd218f8500001ba1965f.G1tLeNLTWDF3vuEm?active=1"
+#     voice_response_xml = f'''<Response>    
+#     <Record startOnDialAnswer="true" redirect="false" />
+#     <GetInput action="{action_url}" inputType="speech" />
+#     </Response>'''
+#     voice_response_xml = f'''<Response>    
+#     <Record startOnDialAnswer="true" redirect="false" />
+#     <GetInput action="{action_url}" inputType="speech" />
+#     </Response>'''
+#     return Response(str(voice_response_xml), mimetype="text/xml")
 
 ### THIS ROUTE HANDLES ALL OF THE VOICE ACTION WEBHOOKS SENT FROM TWILIO
 ### THE SLUG IS THE VF API KEY FOR THE BOT
@@ -68,25 +71,27 @@ def recordCall(api_key):
 ###     - DIRECTION: WHETHER THE CALL WAS OUTBOUND OR INBOUND 
 @app.route('/<api_key>', methods=['POST'])
 def index(api_key):
+    voice_response = []
     sandbox = False
     hangup = False
     audio_files = []
     if request.args.get('sandbox') == '1':
         sandbox = True
     logger.debug(str(request.form))
-    call_id = request.form.get("CallSid")
+    call_id = request.form.get("call_sid")
     if call_id == None:
         call_id = request.form.get("CallUUID")
-    text = request.form.get("SpeechResult")
-    if text == None:
-        text = request.form.get("Speech")
+    jsonrequest = request.get_json(force = True)
+    text = jsonrequest["speech"]["alternatives"][0]["transcript"]
+    # if text == None:
+    #     text = request.json.form.get("Speech")
     if text:
         text = cleanText(text)
-    logger.debug('Twilio Speech Result: {}'.format(text))
+    logger.debug('Speech Result: {}'.format(text))
     logger.debug(text)
 
     # TWILIO VOICE RESPONSE BUILDER *ONLY FOR NON-ACTIVE LISTENING
-    voice_response = VoiceResponse()
+    #voice_response = VoiceResponse()
 
     # THIS THE URL WE CALLBACK TO WHEN THE CUSTOMER TALKS AGAIN
     action_url = f"https://voiceflow.puretalk.ai/{api_key}"
@@ -99,26 +104,38 @@ def index(api_key):
     if request.args.get('active') == '1':
         action_url += '?active=1'
 
-    # TWILIO VOICE RESPONSE BUILDER *ONLY FOR ACTIVE LISTENING
-    voice_response_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Gather action="{action_url}" actionOnEmptyResult="true" enhanced="true" input="speech" speechModel="phone_call" speechTimeout="0">
-    '''
+    gather_base = {
+    "verb": "gather",
+    "actionHook": action_url,
+    "recognizer": {
+    "vendor": "Google",
+    "language": "en-US"
+    },
+    "input": ["speech"],
+    "play": {"url": []}
+    }
 
-    # PLIVO VOICE RESPONSE BUILDER *ONLY FOR PLIVO
-    voice_response_xml_plivo = f'''<Response>
-    <GetInput action="{action_url}" inputType="speech">
-    '''
 
-    # NON ACTIVE LISTENING GATHER
-    gather = Gather(
-        input="speech",
-        action=action_url,
-        actionOnEmptyResult=True,
-        speechTimeout=0,
-        speechModel='phone_call',
-        enhanced=True,
-    )
+#     # TWILIO VOICE RESPONSE BUILDER *ONLY FOR ACTIVE LISTENING
+#     voice_response_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Gather action="{action_url}" actionOnEmptyResult="true" enhanced="true" input="speech" speechModel="phone_call" speechTimeout="0">
+#     '''
+
+#     # PLIVO VOICE RESPONSE BUILDER *ONLY FOR PLIVO
+#     voice_response_xml_plivo = f'''<Response>
+#     <GetInput action="{action_url}" inputType="speech">
+#     '''
+
+#     # NON ACTIVE LISTENING GATHER
+#     gather = Gather(
+#         input="speech",
+#         action=action_url,
+#         actionOnEmptyResult=True,
+#         speechTimeout=0,
+#         speechModel='phone_call',
+#         enhanced=True,
+#     )
     transfer = False
     first_time = True
     try:
@@ -172,7 +189,7 @@ def index(api_key):
                 if has_message:
                     # CREATES/RETRIEVES TTS AUDIO FOR AI RESPONSE
                     msg_text = response['payload']['message']
-                    play_file = createFile(msg_text)
+                    play_file = createFile2(msg_text)
                     logger.debug(f'PLAY FILE: {play_file}')
                     
                     # UPDATES SANDBOX CONVERSATION
@@ -201,7 +218,7 @@ def index(api_key):
                                     updateNoAnswer(call_id)
                                 except:
                                     pass
-                                voice_response.hangup()
+                                voice_response.append({ "verb": "hangup", "headers": { "X-Reason" : "REPEATED OURSELVES TOO MANY TIMES"  } })
                                 hangup = True
                         logger.debug(f'REPEATED TIMES: {repeat_times}')
 
@@ -220,8 +237,6 @@ def index(api_key):
                     # CHECK TO SEE IF WE NEED TO TRANSFER THE CALL OR NOT
                     if not msg_text in xfer_response:
                         voice_response_xml += play_file
-                        voice_response_xml_plivo += play_file
-                        voice_response.play(cleanForNonActive(play_file))
                         audio_files.append(play_file)
                         logger.debug(f'AUDIO FILES: {audio_files}')
                     elif msg_text in xfer_response:
@@ -229,8 +244,8 @@ def index(api_key):
                         xfer_number = getCampaignXfer(call_id)
                         xfer_caller_id = request.form.get("From")
                         if request.form.get("Direction") == 'outbound-api':
-                            xfer_caller_id = request.form.get("To")
-                        voice_response.dial(number=xfer_number, caller_id=xfer_caller_id)
+                            xfer_caller_id = request.form.get("to")
+                        #voice_response.dial(number=xfer_number, caller_id=xfer_caller_id)
 
                         voice_response_xml += f'''
                             <Dial callerId="{xfer_caller_id}" record="true" recordingStatusCallback="https://twilio.puretalk.ai/recording/callback" recordingStatusCallbackMethod="POST">
@@ -257,7 +272,8 @@ def index(api_key):
                         # CHECK TO SEE IF VF IS SENDING AN END CONVERSATION
                         if response['type'] == 'end' and transfer == False:
                             logger.debug("HANGUP CALL")
-                            voice_response.hangup()
+                            voice_response.append({ "verb": "hangup", "headers": { "X-Reason" : "Told To"  } })
+                                
                             hangup = True
                     except:
                         pass
@@ -272,7 +288,7 @@ def index(api_key):
                 updateSQL(f"update calls set repeat_times = {repeat_times} where call_id = '{call_id}'")
                 if repeat_times > 2:
                     updateNoAnswer(call_id)
-                    voice_response.hangup()
+                    voice_response.append({ "verb": "hangup", "headers": { "X-Reason" : "REPEATED TOO MANY TIMES"  } })
                     hangup = True
             con.close()
             
@@ -299,8 +315,10 @@ def index(api_key):
                     voice_response_xml += play_file
 
                     voice_response_xml_plivo += play_file
-                    voice_response.play(cleanForNonActive(play_file))
+                    #voice_response.append(cleanForNonActive(play_file))
+                    gather = copy.deepcopy(gather_base)
                     audio_files.append(play_file)
+                    gather["play"]["url"] = audio_files
 
         if transfer == False:
             voice_response.append(gather)
@@ -311,7 +329,7 @@ def index(api_key):
         except:
             logger.debug('FAILED 2')
             pass
-        voice_response.hangup()
+        voice_response.append({ "verb": "hangup", "headers": { "X-Reason" : "Failed2"  } })
         hangup = True
     voice_response_xml += '''
         </Gather>
@@ -334,12 +352,9 @@ def index(api_key):
 </Response>
         '''
     if request.args.get('active') == '1' and transfer == False:
-        logger.debug(str(voice_response_xml))
-        if request.args.get('plivo') == '1':
-            return Response(str(voice_response_xml_plivo), mimetype="text/xml")
-        return Response(str(voice_response_xml), mimetype="text/xml")
-    else:
-        return Response(str(voice_response), mimetype="text/xml")
+        logger.debug(str(voice_response))
+    return Response(jsonify(voice_response), mimetype="application/json")
+
 
 @app.route('/unknown', methods=['POST'])
 def unknownIntent():
@@ -583,6 +598,22 @@ def createFile(text):
                 f.write(req.content)
 
         return f'''<Play>https://voiceflow.puretalk.ai/static/audio/{file_name}</Play>'''
+
+def createFile2(text):
+    url = 'http://137.184.57.49:5006/convert'
+    content = text
+    if len(content) <= 280:
+        file_name = str(hashlib.md5(content.encode('utf-8')).hexdigest()) + '.wav'
+        if not findFile('./static/audio/'+file_name):
+            payload = {
+                "region":"eastus",
+                "text":content
+            }
+            req = requests.post(url, json=payload)
+            with open('./static/audio/'+file_name, mode='bx') as f:
+                f.write(req.content)
+
+        return f'''https://voiceflow.puretalk.ai/static/audio/{file_name}'''
 
 def findFile(name):
     return os.path.exists(name)
